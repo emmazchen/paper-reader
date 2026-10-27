@@ -1,0 +1,9 @@
+.DS_Store
+*.app/
+.PaperReader-build.*
+.build/
+vendor/
+scripts/register-app
+tests/*-checks
+tests/*.pdf
+*.dSYM/
