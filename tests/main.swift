@@ -156,3 +156,44 @@ let regular = "See Fig. 2."
 let regularRef = FigureSearch.references(regular)[0]
 check(types.highlightRange(for:regularRef.range,in:regular) == regularRef.range, "Ordinary reference range unchanged")
 print("3 prefix highlight checks passed")
+
+let columnCaption = [
+    CaptionLine(text:"Figure 2. a) First panel.",bounds:CGRect(x:50,y:600,width:230,height:12),font:pdfCaptionFont),
+    CaptionLine(text:"The left column ends with a complete sentence.",bounds:CGRect(x:50,y:584,width:230,height:12),font:pdfCaptionFont),
+    CaptionLine(text:"b) The caption continues in the right column.",bounds:CGRect(x:320,y:600,width:230,height:12),font:pdfCaptionFont),
+    CaptionLine(text:"Final right-column explanation.",bounds:CGRect(x:320,y:584,width:230,height:12),font:pdfCaptionFont),
+    CaptionLine(text:"Discussion",bounds:CGRect(x:320,y:540,width:230,height:18))
+]
+check(CaptionDetector.captions(in:columnCaption,figure:"2")[0].contains("Final right-column explanation."),"Follow caption into right column")
+print("Column continuation regression passed")
+let threeColumns = columnCaption + [CaptionLine(text:"c) Third-column continuation.",bounds:CGRect(x:590,y:600,width:230,height:12),font:pdfCaptionFont)]
+check(CaptionDetector.captions(in:threeColumns,figure:"2")[0].contains("Third-column continuation"),"Search additional columns")
+let unrelatedColumn = [
+    CaptionLine(text:"Figure 2. Caption ends here.",bounds:CGRect(x:50,y:600,width:230,height:12),font:pdfCaptionFont),
+    CaptionLine(text:"An unrelated paragraph.",bounds:CGRect(x:320,y:600,width:230,height:12),font:pdfLabelFont)
+]
+check(!CaptionDetector.captions(in:unrelatedColumn,figure:"2")[0].contains("unrelated"),"Reject different-font adjacent paragraph")
+let wrap = [captionLine("Figure 2. Accuracy is measured",50,600),captionLine("across all subjects.",320,600)]
+check(CaptionDetector.captions(in:wrap,figure:"2")[0].contains("across all subjects"),"Unfinished sentence can continue without fonts")
+let columnData = NSMutableData()
+let columnContext = CGContext(consumer:CGDataConsumer(data:columnData as CFMutableData)!,mediaBox:&box,nil)!
+columnContext.beginPDFPage(nil)
+for (text,x,y) in [("Figure 2. a) First panel.",50.0,600.0),("Left-column explanation.",50.0,584.0),("b) Second panel.",320.0,600.0),("Final caption continuation.",320.0,584.0)] {
+    columnContext.textPosition = CGPoint(x:x,y:y)
+    CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string:text,attributes:[NSAttributedString.Key(kCTFontAttributeName as String):CTFontCreateWithName("Helvetica" as CFString,10,nil)])),columnContext)
+}
+columnContext.endPDFPage(); columnContext.closePDF()
+let columnPage = PDFDocument(data:columnData as Data)!.page(at:0)!
+let columnText = columnPage.string!
+let columnLines = columnPage.selection(for:NSRange(location:0,length:(columnText as NSString).length))!.selectionsByLine().map { CaptionLine(text:$0.string!,bounds:$0.bounds(for:columnPage),font:CaptionDetector.sourceFont(in:$0.attributedString)) }
+check(CaptionDetector.captions(in:columnLines,figure:"2")[0].contains("Final caption continuation"),"PDFKit two-column caption integration")
+print("4 additional column checks passed")
+
+let groupedCaption = "Fig. 3 | Tau is synthesized exclusively in neuronal dendrites. a, First panel. b, Second panel. c, Third panel. d, Fourth panel. e, Reconstruction. f, g, smFISH and STARFISH-Mapt in DIV1 (f) and DIV6 (g) primary hippocampal neurons. h, Quantification."
+check(labels(groupedCaption) == ["a,","b,","c,","d,","e,","f, g,","h,"],"Grouped panel labels stay together and inline references stay in prose")
+print("Grouped caption regression passed")
+check(labels("Figure 4. (a) and (b) Shared explanation. (c) Another panel.") == ["(a) and (b)","(c)"],"Group parenthesized heading labels")
+check(labels("Figure 4. (a), (b) Shared explanation. (c) Another panel.") == ["(a), (b)","(c)"],"Group comma-separated parenthesized labels")
+check(labels("Figure 4. (a) Results at DIV1 (a) and DIV6 (b). (b) Quantification.") == ["(a)","(b)"],"Do not split inline parenthetical references")
+check(labels("Figure 4. a, b, Shared description. c, Next panel.") == ["a, b,","c,"],"Grouped labels generalize to other letters")
+print("4 general panel-grouping checks passed")

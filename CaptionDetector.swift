@@ -10,14 +10,28 @@ struct CaptionLine {
 
 struct CaptionDetector {
     static func formattedLabelRanges(_ text: String) -> [NSRange] {
-        let regex = try! NSRegularExpression(pattern:"(?m)^• (\\([a-z]\\)|[a-z][),]?)(?=\\s|$)")
+        let unit = "(?:\\([a-z]\\)|[a-z][),]?)"
+        let groupedUnit = "(?:\\([a-z]\\)|[a-z][),])"
+        let regex = try! NSRegularExpression(pattern:"(?m)^• (" + unit + "(?:\\s*(?:and|&|,)?\\s+" + groupedUnit + ")*)(?=\\s|$)")
         return regex.matches(in:text,range:NSRange(text.startIndex...,in:text)).map { $0.range(at:1) }
     }
     static func panelLabelRanges(_ text: String) -> [NSRange] {
         let full = NSRange(text.startIndex...,in:text)
         let source = text as NSString
-        let explicit = try! NSRegularExpression(pattern:"(?<![\\p{L}\\p{N}])(?:\\([a-z]\\)|[a-z]\\))(?=\\s|$)")
-        var ranges = explicit.matches(in:text,range:full).map(\.range)
+        let explicit = try! NSRegularExpression(pattern:"(?<![\\p{L}\\p{N}])(?:\\([a-z]\\)|[a-z]\\))(?=[\\s,]|$)")
+        var ranges: [NSRange] = []
+        for match in explicit.matches(in:text,range:full) {
+            let range = match.range
+            let label = source.substring(with:range)
+            let prefix = source.substring(to:range.location).trimmingCharacters(in:.whitespacesAndNewlines)
+            let boundary = prefix.isEmpty || prefix.last.map { ".!?:|".contains($0) } == true
+            var groupedWithHeading = false
+            if let previous = ranges.last {
+                let gap = source.substring(with:NSRange(location:NSMaxRange(previous),length:range.location-NSMaxRange(previous))).trimmingCharacters(in:.whitespacesAndNewlines)
+                groupedWithHeading = ["",",","and","&"].contains(gap)
+            }
+            if !label.hasPrefix("(") || boundary || groupedWithHeading { ranges.append(range) }
+        }
         // Commas can occur mid-line. Bare letters must follow a sentence end.
         let weak = try! NSRegularExpression(pattern:"(?<![\\p{L}\\p{N}])([a-z],)(?=\\s)|(?:^|[.!?]\\s+)([a-z])(?=\\s)")
         let candidates = weak.matches(in:text,range:full).map { match -> (range:NSRange, letter:UInt32, comma:Bool, boundary:Bool) in
@@ -36,7 +50,19 @@ struct CaptionDetector {
             }
             if paired { ranges.append(item.range) }
         }
-        return ranges.sorted { $0.location < $1.location }
+        let ordered = ranges.sorted { $0.location < $1.location }
+        var grouped: [NSRange] = []
+        for range in ordered {
+            if let previous = grouped.last {
+                let gap = source.substring(with:NSRange(location:NSMaxRange(previous),length:range.location-NSMaxRange(previous))).trimmingCharacters(in:.whitespacesAndNewlines)
+                if ["",",","and","&"].contains(gap) {
+                    grouped[grouped.count-1] = NSUnionRange(previous,range)
+                    continue
+                }
+            }
+            grouped.append(range)
+        }
+        return grouped
     }
     static func format(_ text: String) -> String {
         let normalized = FigureSearch.normalize(text).trimmingCharacters(in:.whitespacesAndNewlines)
@@ -99,16 +125,58 @@ struct CaptionDetector {
                 if let below { fragments.append(below.element.text); used.insert(below.offset); last = below.element }
             }
             guard isStart(fragments.joined(separator:" ")) else { continue }
-            // Follow nearby lines down the same column rather than copying a
-            // fixed number of sentences, which can swallow adjacent columns.
-            for _ in 0..<60 {
+            var columnStart = first
+            // Follow a column downward; only when it runs out, inspect the
+            // next column for a matching caption block in reading order.
+            for _ in 0..<180 {
                 let next = lines.enumerated().filter { item in
                     let line = item.element
                     let gap = last.bounds.minY-line.bounds.maxY
-                    return !used.contains(item.offset) && gap >= -2 && gap <= max(last.bounds.height,line.bounds.height)*1.2 && abs(line.bounds.minX-first.bounds.minX) <= 25 && line.bounds.minX < first.bounds.maxX
+                    return !used.contains(item.offset) && gap >= -2 && gap <= max(last.bounds.height,line.bounds.height)*1.2 && abs(line.bounds.minX-columnStart.bounds.minX) <= 25 && line.bounds.minX < columnStart.bounds.maxX
                 }.min { $0.element.bounds.maxY > $1.element.bounds.maxY }
-                guard let next, !isOtherBlock(next.element.text), next.element.bounds.height <= max(first.bounds.height,last.bounds.height)*1.45 else { break }
-                used.insert(next.offset); last = next.element; fragments.append(last.text)
+                if let next {
+                    guard !isOtherBlock(next.element.text), next.element.bounds.height <= max(columnStart.bounds.height,last.bounds.height)*1.45 else { break }
+                    used.insert(next.offset); last = next.element; fragments.append(last.text)
+                    continue
+                }
+                let accumulated = fragments.joined(separator:" ")
+                let priorLabels = panelLabelRanges(accumulated)
+                let priorLetter = priorLabels.last.flatMap { range in
+                    (accumulated as NSString).substring(with:range).unicodeScalars.first { CharacterSet.lowercaseLetters.contains($0) }?.value
+                }
+                let continuation = lines.enumerated().filter { item in
+                    let line = item.element
+                    guard !used.contains(item.offset),
+                          line.bounds.minX >= columnStart.bounds.maxX+8,
+                          abs(line.bounds.maxY-columnStart.bounds.maxY) <= max(line.bounds.height,columnStart.bounds.height)*1.5,
+                          abs(line.bounds.height-last.bounds.height) <= max(3,last.bounds.height*0.3),
+                          !isOtherBlock(line.text) else { return false }
+                    // Only the top line of the block may start a continuation.
+                    let hasLineAbove = lines.contains { other in
+                        abs(other.bounds.minX-line.bounds.minX) <= 25 && other.bounds.minY >= line.bounds.maxY-2 && other.bounds.minY-line.bounds.maxY <= line.bounds.height*1.2
+                    }
+                    guard !hasLineAbove else { return false }
+                    let fontMatches: Bool
+                    if let leftFont = last.font, let rightFont = line.font {
+                        fontMatches = leftFont.familyName == rightFont.familyName && abs(leftFont.pointSize-rightFont.pointSize) <= 1
+                    } else { fontMatches = false }
+                    let beginsNextPanel: Bool
+                    let labelRegex = try! NSRegularExpression(pattern:"^\\s*\\(?([a-z])(?:[),]|\\s)")
+                    if let hit = labelRegex.firstMatch(in:line.text,range:NSRange(line.text.startIndex...,in:line.text)), let priorLetter {
+                        let letter = (line.text as NSString).substring(with:hit.range(at:1)).unicodeScalars.first!.value
+                        beginsNextPanel = letter == priorLetter+1
+                    } else { beginsNextPanel = false }
+                    let tail = last.text.trimmingCharacters(in:.whitespacesAndNewlines)
+                    let head = line.text.trimmingCharacters(in:.whitespacesAndNewlines)
+                    let unfinished = tail.last.map { !".!?:".contains($0) } == true && head.first?.isLowercase == true
+                    return fontMatches || beginsNextPanel || unfinished
+                }.min { lhs,rhs in
+                    if abs(lhs.element.bounds.minX-rhs.element.bounds.minX) > 25 { return lhs.element.bounds.minX < rhs.element.bounds.minX }
+                    return lhs.element.bounds.maxY > rhs.element.bounds.maxY
+                }
+                guard let continuation else { break }
+                columnStart = continuation.element
+                last = continuation.element; used.insert(continuation.offset); fragments.append(last.text)
             }
             let result = FigureSearch.normalize(fragments.joined(separator:"\n")).trimmingCharacters(in:.whitespacesAndNewlines)
             if !results.contains(where: { $0.text == result }) {
