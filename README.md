@@ -54,3 +54,13 @@ swiftc HighlightStore.swift tests/highlights/main.swift -o tests/highlight-check
 ## Build and update the installed app
 
 Run `./scripts/build-app.command` to compile, sign, and update both the project bundle and `~/Applications/Paper Reader.app`. Quit and reopen any running copy to load the new build. Use this script for future updates so the installed copy stays current.
+
+## Selection and navigation
+
+Starting a PDF selection or scrolling cancels queued automatic searches. A stale search cannot replace your selection. Figure links navigate the left pane only on a deliberate click; dragging, Shift-clicking, and highlighting do not follow those links. Explicit Find and Previous/Next controls still navigate the right pane.
+
+Run `./scripts/test.command` for all checks, including generated-PDF interaction regressions. The interaction suite exercises the actual Reader handlers programmatically; physical mouse behavior should also be checked on macOS.
+
+## Captions across pages
+
+Caption extraction follows matching blocks through columns and onto subsequent pages. It learns the caption font and panel-label style, including `(A)`, `a,`, and `A.`. At a page break, continuation requires an explicit continued heading, font/layout agreement with sentence or panel continuity, or a consistently smaller caption font matching the next block. Repeated running headers and page numbers are excluded. Another caption, section heading, body-font change, or ambiguous continuation stops extraction. The original figure page remains the navigation target.

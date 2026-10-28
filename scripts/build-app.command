@@ -5,7 +5,7 @@ project_app="$PWD/Paper Reader.app"
 installed_app="$HOME/Applications/Paper Reader.app"
 build_binary=$(mktemp "$PWD/.PaperReader-build.XXXXXX")
 trap 'rm -f "$build_binary"' EXIT
-swiftc main.swift Search.swift CaptionDetector.swift BalancedSplitView.swift HighlightStore.swift -o "$build_binary" -framework AppKit -framework PDFKit -framework NaturalLanguage
+swiftc main.swift Search.swift CaptionDetector.swift BalancedSplitView.swift HighlightStore.swift SelectionPDFView.swift -o "$build_binary" -framework AppKit -framework PDFKit -framework NaturalLanguage
 mkdir -p "$project_app/Contents/MacOS"
 cp resources/Info.plist "$project_app/Contents/Info.plist"
 chmod +x "$build_binary"

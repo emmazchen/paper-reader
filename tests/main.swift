@@ -197,3 +197,91 @@ check(labels("Figure 4. (a), (b) Shared explanation. (c) Another panel.") == ["(
 check(labels("Figure 4. (a) Results at DIV1 (a) and DIV6 (b). (b) Quantification.") == ["(a)","(b)"],"Do not split inline parenthetical references")
 check(labels("Figure 4. a, b, Shared description. c, Next panel.") == ["a, b,","c,"],"Grouped labels generalize to other letters")
 print("4 general panel-grouping checks passed")
+
+let rangeCaption = "Fig. 4 | Newly synthesized tau is a dendritic substrate of neuroproteasomes. a–c, Pulse–chase experiments in neurons pre-treated with epoxomicin (a) or iBEp (b). c, Same as a but immunoprecipitating MAP2. d, Micrographs. e, STARFISH labeling."
+check(labels(rangeCaption) == ["a–c,","c,","d,","e,"],"Range heading plus individual panel descriptions")
+check(labels("Figure 2. a-c, Shared description. d, Next panel. e, Final panel.") == ["a-c,","d,","e,"],"Hyphenated panel range")
+check(labels("Figure 2. (a–c) Shared description. (c) More detail. (d) Next panel.") == ["(a–c)","(c)","(d)"],"Parenthesized panel range")
+check(labels("Figure 2. a, First panel. b, Second panel. As noted in a, the result improves. c, Third panel.") == ["a,","b,","c,"],"Alphabetical progression rejects backward inline references")
+check(labels("Figure 2. a, First panel. b, Second panel. b, repeated inline label. c, Third panel.") == ["a,","b,","c,"],"Repeated single panel is not another heading")
+print("5 alphabetical range-label checks passed")
+check(labels("Figure 2. (a) First. (b–d) Combined. (d) Detail. (e) Last.") == ["(a)","(b–d)","(d)","(e)"],"Range can follow earlier single panel")
+
+// Caption continuation uses original page geometry and the caption's style.
+let pageBounds = CGRect(x:0,y:0,width:612,height:792)
+func pageLine(_ text: String,_ y: CGFloat,_ x: CGFloat = 50,_ font: NSFont? = pdfCaptionFont) -> CaptionLine {
+    CaptionLine(text:text,bounds:CGRect(x:x,y:y,width:230,height:12),font:font)
+}
+func captionPage(_ lines: [CaptionLine]) -> CaptionDetector.Page { CaptionDetector.Page(lines:lines,bounds:pageBounds) }
+let firstCaptionPage = captionPage([pageLine("Figure 2. (A) First panel.",90),pageLine("(B) Second panel.",74)])
+let continuedPage = captionPage([pageLine("(C) Third panel.",700),pageLine("Final caption explanation.",684)])
+let pageCaption = CaptionDetector.captions(across:[firstCaptionPage,continuedPage],figure:"2")
+check(pageCaption.count == 1 && pageCaption[0].text.contains("Final caption explanation"),"Append next-page panel continuation")
+check(pageCaption[0].page == 0,"Keep original figure page as navigation target")
+check(labels(pageCaption[0].text) == ["(A)","(B)","(C)"],"Uppercase parenthesized panel headings stay bold and ordered")
+check(labels("Figure 2. A. First panel. B. Second panel. C. Third panel.") == ["A.","B.","C."],"Uppercase dotted panel labels")
+check(labels("Figure 2. a, First panel. b, Second panel.") == ["a,","b,"],"Lowercase comma labels retained")
+let sentencePages = [captionPage([pageLine("Figure 2. Signal was measured across",80)]),captionPage([pageLine("all tested neurons.",700)])]
+check(CaptionDetector.captions(across:sentencePages,figure:"2")[0].text.contains("across all tested neurons"),"Sentence continues across page break")
+let sameFontBody = captionPage([pageLine("Unrelated body text uses the same font.",700)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,sameFontBody],figure:"2")[0].text.contains("Unrelated"),"Font alone never establishes continuation")
+let differentFont = captionPage([pageLine("(C) Third panel.",700,50,NSFont(name:"Helvetica",size:12)!)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,differentFont],figure:"2")[0].text.contains("Third panel"),"Reject next-page font mismatch")
+let wrongCase = captionPage([pageLine("(c) A different label convention.",700)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,wrongCase],figure:"2")[0].text.contains("different label"),"Learn uppercase/lowercase caption label style")
+let nextFigure = captionPage([pageLine("Figure 3. A different caption.",700)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,nextFigure],figure:"2")[0].text.contains("Figure 3"),"Stop at next figure caption")
+let nextSection = captionPage([pageLine("Discussion",720),pageLine("(C) Unrelated section content.",700)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,nextSection],figure:"2")[0].text.contains("Unrelated"),"Do not skip section heading to find a panel letter")
+let explicitPage = captionPage([pageLine("Figure 2 (continued).",720,50,pdfLabelFont),pageLine("Continuation starts with a complete sentence.",704)])
+let explicitCaption = CaptionDetector.captions(across:[firstCaptionPage,explicitPage],figure:"2")
+check(explicitCaption.count == 1 && explicitCaption[0].text.contains("Continuation starts"),"Explicit continued caption with different header font")
+check(!explicitCaption[0].text.contains("continued"),"Remove repeated continuation heading")
+let repeatedHeader = pageLine("Journal name | 2026",750,50,pdfLabelFont)
+let withHeaders = [captionPage([repeatedHeader]+firstCaptionPage.lines+[pageLine("12",15)]),captionPage([repeatedHeader]+continuedPage.lines+[pageLine("13",15)])]
+let noHeader = CaptionDetector.captions(across:withHeaders,figure:"2")[0].text
+check(noHeader.contains("Third panel") && !noHeader.contains("Journal name") && !noHeader.contains("13"),"Skip running headers and page numbers")
+let thirdPage = captionPage([pageLine("(D) Fourth panel.",700)])
+let longSecond = captionPage([pageLine("(C) Third panel.",700)]+stride(from:684,through:76,by:-16).map { pageLine("Caption description continues.",CGFloat($0)) })
+check(CaptionDetector.captions(across:[firstCaptionPage,longSecond,thirdPage],figure:"2")[0].text.contains("Fourth panel"),"Caption can continue across more than two pages")
+let styleBoundary = captionPage([pageLine("(C) Third panel.",700),pageLine("Larger article body should not be included.",684,50,pdfLabelFont)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,styleBoundary],figure:"2")[0].text.contains("Larger article"),"Stop continuation at body font change")
+let startsMidPage = captionPage([pageLine("Figure 2. (A) First panel.",500),pageLine("(B) Second panel.",484)])
+check(!CaptionDetector.captions(across:[startsMidPage,continuedPage],figure:"2")[0].text.contains("Third panel"),"No page jump from caption ending mid-page without continued heading")
+print("17 cross-page caption checks passed")
+let lowerCommaPages = [captionPage([pageLine("Figure 2. a, First panel.",90),pageLine("b, Second panel.",74)]),captionPage([pageLine("c, Third panel.",700)])]
+check(CaptionDetector.captions(across:lowerCommaPages,figure:"2")[0].text.contains("c, Third"),"Learn lowercase comma style across pages")
+let dottedPages = [captionPage([pageLine("Figure 2. A. First panel.",90),pageLine("B. Second panel.",74)]),captionPage([pageLine("C. Third panel.",700)])]
+check(CaptionDetector.captions(across:dottedPages,figure:"2")[0].text.contains("C. Third"),"Learn uppercase dotted style across pages")
+let noJumpOverBody = captionPage(firstCaptionPage.lines+[pageLine("Article prose below caption.",35)])
+check(!CaptionDetector.captions(across:[noJumpOverBody,continuedPage],figure:"2")[0].text.contains("Third panel"),"Do not bridge over text below caption")
+let notContinued = captionPage([pageLine("Figure 2 controls were used in a separate experiment.",700)])
+check(!CaptionDetector.captions(across:[firstCaptionPage,notContinued],figure:"2")[0].text.contains("separate experiment"),"Do not treat controls as continued heading")
+
+let multiPageData = NSMutableData()
+let multiPageContext = CGContext(consumer:CGDataConsumer(data:multiPageData as CFMutableData)!,mediaBox:&box,nil)!
+for lines in [[("Figure 2. (A) First panel.",90.0),("(B) Second panel.",74.0)],[("(C) Third panel.",700.0),("The caption finishes on this page.",684.0)]] {
+    multiPageContext.beginPDFPage(nil)
+    for (text,y) in lines {
+        multiPageContext.textPosition = CGPoint(x:50,y:y)
+        CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string:text,attributes:[NSAttributedString.Key(kCTFontAttributeName as String):CTFontCreateWithName("Helvetica" as CFString,10,nil)])),multiPageContext)
+    }
+    multiPageContext.endPDFPage()
+}
+multiPageContext.closePDF()
+let multiPageDocument = PDFDocument(data:multiPageData as Data)!
+let integratedCaption = CaptionDetector.captions(in:multiPageDocument,figure:"2")
+check(integratedCaption.count == 1 && integratedCaption[0].text.contains("finishes on this page"),"Actual multi-page PDF extraction includes continuation")
+check(labels(integratedCaption[0].text) == ["(A)","(B)","(C)"],"Actual PDF preserves learned uppercase label formatting")
+print("6 additional cross-page and PDF integration checks passed")
+let articleFont = NSFont(name:"Times-Roman",size:12)!
+let articleLines = (0..<8).map { pageLine("This is ordinary article body text establishing a larger text font and its usual layout.",CGFloat(700-$0*16),50,articleFont) }
+let smallFontCaptionPage = captionPage(articleLines+[pageLine("Figure 2. A caption description ends here.",90),pageLine("Another caption sentence.",74)])
+let fullSentenceContinuation = captionPage([pageLine("This full sentence continues the caption.",700),pageLine("The caption ends here.",684)])
+check(CaptionDetector.captions(across:[smallFontCaptionPage,fullSentenceContinuation],figure:"2")[0].text.contains("full sentence continues"),"Distinct smaller caption font plus layout supports full-sentence continuation")
+let combinedColumnsAndPages = captionPage([
+    pageLine("Figure 2. (A) Left-column caption.",160),pageLine("Left-column explanation.",144),
+    pageLine("(B) Right-column continuation.",160,320),pageLine("Caption reaches the page bottom.",144,320)
+])
+check(CaptionDetector.captions(across:[combinedColumnsAndPages,continuedPage],figure:"2")[0].text.contains("Third panel"),"Follow both column and page transitions in one caption")
+print("2 font-profile and combined-layout checks passed")

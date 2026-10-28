@@ -7,3 +7,5 @@ swiftc BalancedSplitView.swift tests/layout/main.swift -o tests/layout-checks -f
 ./tests/layout-checks
 swiftc HighlightStore.swift tests/highlights/main.swift -o tests/highlight-checks -framework AppKit -framework PDFKit -framework CoreText
 ./tests/highlight-checks
+
+./scripts/test-interactions.command

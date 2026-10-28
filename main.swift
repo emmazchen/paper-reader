@@ -43,10 +43,10 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
     var appearanceButton: NSButton!
     var pendingOpenURL: URL?
     var readyToOpen = false
-    let pdf = PDFView()
+    let pdf = SelectionPDFView()
     let caption = NSTextView()
     var hasCaption = false
-    let textPDF = PDFView()
+    let textPDF = SelectionPDFView()
     let mentionLabel = NSTextField(labelWithString: "No matches")
     var previousMentionButton: NSButton!
     var nextMentionButton: NSButton!
@@ -68,6 +68,9 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
     var clickMonitor: Any?
     var figureTypes = FigureTypes(pages:[])
     var pendingSearch: DispatchWorkItem?
+    var searchGeneration = 0
+    var pdfMouseDown: (view:SelectionPDFView, point:NSPoint)?
+    var pdfDragOccurred = false
     var autosaveWork: DispatchWorkItem?
     enum AnnotationTool { case none, highlight, remove }
     var annotationTool: AnnotationTool = .none
@@ -109,42 +112,12 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
             item.keyEquivalentModifierMask = modifiers; item.target = self
         }
         NSApp.mainMenu = menu
-        // Intercept before PDFKit follows embedded links in the reading pane.
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.leftMouseUp]) { [weak self] event in
+        for view in [pdf,textPDF] {
+            view.interactionBegan = { [weak self] in self?.cancelPendingSearch() }
+        }
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.leftMouseDragged,.leftMouseUp,.scrollWheel]) { [weak self] event in
             guard let self, event.window === self.window else { return event }
-            if event.type == .leftMouseUp {
-                if self.annotationTool == .highlight {
-                    for view in [self.pdf,self.textPDF] {
-                        if view.visibleRect.contains(view.convert(event.locationInWindow,from:nil)) {
-                            self.lastPDF = view
-                            DispatchQueue.main.async { [weak self] in
-                                guard let self, self.annotationTool == .highlight else { return }
-                                self.applySelectedHighlight()
-                            }
-                            break
-                        }
-                    }
-                }
-                return event
-            }
-            for view in [self.pdf,self.textPDF] {
-                let point = view.convert(event.locationInWindow,from:nil)
-                if view.visibleRect.contains(point) {
-                    self.lastPDF = view
-                    self.clickedHighlight = nil
-                    if let page = view.page(for:point,nearest:false) {
-                        let position = view.convert(point,to:page)
-                        if let annotation = page.annotations.reversed().first(where: { HighlightStore.isHighlight($0) && $0.bounds.contains(position) }) {
-                            self.clickedHighlight = (page,annotation)
-                            if self.annotationTool == .remove || event.modifierFlags.contains(.option) {
-                                self.removeClickedHighlight(); return nil
-                            }
-                        }
-                    }
-                }
-            }
-            guard self.annotationTool == .none else { return event }
-            return self.handleReferenceClick(event) ? nil : event
+            return self.handlePDFInteraction(event)
         }
         NotificationCenter.default.addObserver(self,selector:#selector(pageChanged),name:.PDFViewPageChanged,object:pdf)
         window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1250,height: 850), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
@@ -220,6 +193,10 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
         let navigation = NSStackView(views: [previousMentionButton, mentionLabel, nextMentionButton])
         let figureSearch = NSStackView(views:[NSTextField(labelWithString:"Find figure"),number,button("Find",#selector(findPassages))])
         textQuery.placeholderString = "Search paper text"; textQuery.delegate = self
+        // Debouncing is owned by Reader. Disable NSSearchField's independent
+        // delayed action so it cannot restart a canceled search on focus loss.
+        textQuery.sendsWholeSearchString = true
+        (textQuery.cell as? NSSearchFieldCell)?.sendsActionOnEndEditing = false
         textQuery.target = self; textQuery.action = #selector(findText)
         textQuery.widthAnchor.constraint(greaterThanOrEqualToConstant:160).isActive = true
         let textSearch = NSStackView(views:[NSTextField(labelWithString:"Find text"),textQuery,button("Find",#selector(findText))])
@@ -367,7 +344,7 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
             alert.runModal(); return false
         }
         guard confirmUnsavedChanges() else { return false }
-        pendingSearch?.cancel()
+        cancelPendingSearch()
         document = loaded; pdf.document = loaded
         // Separate documents keep selections and navigation independent.
         textPDF.document = PDFDocument(data:sourceData)
@@ -413,17 +390,93 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
     }
     @objc func previousPage() { guard document != nil else { return }; pageIndex = max(0,pageIndex-1); showPage() }
     @objc func nextPage() { guard let document else { return }; pageIndex = min(document.pageCount-1,pageIndex+1); showPage() }
-    func controlTextDidChange(_ obj: Notification) {
+    func cancelPendingSearch() {
+        searchGeneration += 1
         pendingSearch?.cancel()
-        let isTextSearch = (obj.object as? NSTextField) === textQuery
+        pendingSearch = nil
+    }
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === textQuery || field === number else { return }
+        cancelPendingSearch()
+        let generation = searchGeneration
+        let isTextSearch = field === textQuery
         let work = DispatchWorkItem { [weak self] in
-            if isTextSearch { self?.findText() } else { self?.findPassages() }
+            guard let self, self.searchGeneration == generation else { return }
+            if isTextSearch { self.findText() } else { self.findPassages() }
         }
-        pendingSearch = work; DispatchQueue.main.asyncAfter(deadline: .now()+0.25,execute:work)
+        pendingSearch = work; DispatchQueue.main.asyncAfter(deadline:.now()+0.25,execute:work)
+    }
+    func handlePDFInteraction(_ event: NSEvent) -> NSEvent? {
+        let hit = [pdf,textPDF].first {
+            let point = $0.convert(event.locationInWindow,from:nil)
+            return $0.bounds.contains(point) && $0.visibleRect.contains(point)
+        }
+        if event.type == .scrollWheel {
+            if hit != nil { cancelPendingSearch() }
+            return event
+        }
+        if event.type == .leftMouseDown {
+            pdfMouseDown = nil; pdfDragOccurred = false
+            guard let view = hit else { return event }
+            cancelPendingSearch()
+            lastPDF = view
+            pdfMouseDown = (view,event.locationInWindow)
+            view.suppressLinkActions = true
+            clickedHighlight = nil
+            let point = view.convert(event.locationInWindow,from:nil)
+            if let page = view.page(for:point,nearest:false) {
+                let position = view.convert(point,to:page)
+                if let annotation = page.annotations.reversed().first(where:{ HighlightStore.isHighlight($0) && $0.bounds.contains(position) }) {
+                    clickedHighlight = (page,annotation)
+                    if annotationTool == .remove || event.modifierFlags.contains(.option) {
+                        pdfMouseDown = nil; view.suppressLinkActions = false
+                        removeClickedHighlight(); return nil
+                    }
+                }
+            }
+        } else if event.type == .leftMouseDragged {
+            if let down = pdfMouseDown, hypot(event.locationInWindow.x-down.point.x,event.locationInWindow.y-down.point.y) > 3 {
+                pdfDragOccurred = true
+            }
+        } else if event.type == .leftMouseUp, let down = pdfMouseDown {
+            let click = !pdfDragOccurred && event.clickCount == 1 && !event.modifierFlags.contains(.shift)
+                && hypot(event.locationInWindow.x-down.point.x,event.locationInWindow.y-down.point.y) <= 3
+                && hit === down.view
+            let tool = annotationTool
+            pdfMouseDown = nil
+            // PDFKit may process the native link after its mouse-up callback.
+            // Keep suppression active until the gesture has completely unwound.
+            DispatchQueue.main.async { [weak self] in
+                down.view.suppressLinkActions = false
+                guard let self else { return }
+                if tool == .highlight && self.annotationTool == .highlight {
+                    self.lastPDF = down.view
+                    self.applySelectedHighlight()
+                } else if tool == .none && self.annotationTool == .none && click {
+                    if down.view === self.textPDF {
+                        let handled = self.handleReferenceClick(event)
+                        if !handled, let action = self.linkAction(in:down.view,event:event) as? PDFActionURL {
+                            down.view.perform(action)
+                        }
+                    } else if let action = self.linkAction(in:down.view,event:event) {
+                        down.view.perform(action)
+                    }
+                }
+            }
+        }
+        return event
+    }
+    func linkAction(in view: PDFView, event: NSEvent) -> PDFAction? {
+        let point = view.convert(event.locationInWindow,from:nil)
+        guard let page = view.page(for:point,nearest:false),
+              let link = page.annotations.first(where:{ $0.type == "Link" && $0.bounds.contains(view.convert(point,to:page)) }) else { return nil }
+        if let action = link.action { return action }
+        if let destination = link.destination { return PDFActionGoTo(destination:destination) }
+        return nil
     }
     @objc func findText() {
         searchMode = .text
-        pendingSearch?.cancel()
+        cancelPendingSearch()
         textResults = []; textResultIndex = 0
         previousMentionButton.isEnabled = false; nextMentionButton.isEnabled = false
         textPDF.clearSelection()
@@ -464,7 +517,7 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
         return highlights
     }
     @objc func findPassages() {
-        pendingSearch?.cancel()
+        cancelPendingSearch()
         searchMode = .figure
         mentions = []; mentionIndex = 0; detectedCaptions = []; manualCaption = false
         textPDF.highlightedSelections = allHighlights; textPDF.clearSelection()
@@ -478,21 +531,13 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
         for index in 0..<searchDocument.pageCount {
             guard let page = searchDocument.page(at:index), let text = page.string else { continue }
             if !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { hasText = true }
-            if let fullSelection = page.selection(for:NSRange(location:0,length:(text as NSString).length)) {
-                let lines = fullSelection.selectionsByLine().compactMap { selection -> CaptionLine? in
-                    guard let text = selection.string, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return nil }
-                    return CaptionLine(text:text,bounds:selection.bounds(for:page),font:CaptionDetector.sourceFont(in:selection.attributedString))
-                }
-                for candidate in CaptionDetector.captionsWithFonts(in:lines,figure:value) {
-                    detectedCaptions.append((index,candidate.text,candidate.font))
-                }
-            }
             for range in FigureSearch.matches(text,figure:value) {
                 guard let selection = page.selection(for:range) else { continue }
                 mentions.append(selection)
 
             }
         }
+        detectedCaptions = CaptionDetector.captions(in:searchDocument,figure:value)
         textPDF.highlightedSelections = allHighlights
         updateCaption()
         if mentions.isEmpty {
@@ -512,11 +557,12 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
             return true
         }
         // Native internal PDF links also navigate only the left document.
-        if let action = page.annotation(at:pagePoint)?.action as? PDFActionGoTo,
-           let targetPage = action.destination.page,
+        if let annotation = page.annotations.first(where:{ $0.type == "Link" && $0.bounds.contains(pagePoint) }),
+           let destination = (annotation.action as? PDFActionGoTo)?.destination ?? annotation.destination,
+           let targetPage = destination.page,
            let index = textPDF.document?.index(for:targetPage),
            let leftPage = document?.page(at:index) {
-            pdf.go(to:PDFDestination(page:leftPage,at:action.destination.point))
+            pdf.go(to:PDFDestination(page:leftPage,at:destination.point))
             status.stringValue = "Opened linked location on the left. Right pane stays in place."
             return true
         }
@@ -524,18 +570,9 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
     }
     func navigateToFigure(_ figure: String, sourcePage: Int) {
         guard let document else { return }
-        pendingSearch?.cancel()
+        cancelPendingSearch()
         let main = String(figure.prefix { $0.isNumber })
-        var candidates: [(page:Int,text:String,font:NSFont?)] = []
-        for index in 0..<document.pageCount {
-            guard let page = document.page(at:index), let text = page.string,
-                  let selection = page.selection(for:NSRange(location:0,length:(text as NSString).length)) else { continue }
-            let lines = selection.selectionsByLine().compactMap { line -> CaptionLine? in
-                guard let text = line.string else { return nil }
-                return CaptionLine(text:text,bounds:line.bounds(for:page),font:CaptionDetector.sourceFont(in:line.attributedString))
-            }
-            candidates += CaptionDetector.captionsWithFonts(in:lines,figure:main).map { (index,$0.text,$0.font) }
-        }
+        let candidates = CaptionDetector.captions(in:document,figure:main)
         guard let target = candidates.min(by: { abs($0.page-sourcePage) < abs($1.page-sourcePage) }),
               let page = document.page(at:target.page) else {
             status.stringValue = "Could not locate Figure \(figure)’s caption. Left and right positions unchanged."
@@ -587,6 +624,7 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
         status.toolTip = nil
     }
     @objc func previousMention() {
+        cancelPendingSearch()
         if searchMode == .text {
             guard textResultIndex > 0 else { return }; textResultIndex -= 1; showTextResult()
         } else {
@@ -594,6 +632,7 @@ final class Reader: NSObject, NSApplicationDelegate, NSSearchFieldDelegate, NSWi
         }
     }
     @objc func nextMention() {
+        cancelPendingSearch()
         if searchMode == .text {
             guard textResultIndex+1 < textResults.count else { return }; textResultIndex += 1; showTextResult()
         } else {
